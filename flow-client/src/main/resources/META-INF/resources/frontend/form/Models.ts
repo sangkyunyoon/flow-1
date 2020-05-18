@@ -1,23 +1,28 @@
 /* tslint:disable:max-classes-per-file */
 
 import { repeat } from "lit-html/directives/repeat";
-import { Binder } from "./Binder";
-import { Required, Validator } from "./Validation";
+import {Binder} from "./Binder";
+import {Required, Validator} from "./Validation";
+import {BinderNode} from "./BinderNode";
 
-const ModelSymbol = Symbol('Model');
-const parentSymbol = Symbol('parent');
+export const ModelSymbol = Symbol('Model');
+export const parentSymbol = Symbol('parent');
 
 export const keySymbol = Symbol('key');
-export const defaultValueSymbol = Symbol('defaultValue');
 export const fromStringSymbol = Symbol('fromString');
 export const validatorsSymbol = Symbol('validators');
 export const requiredSymbol = Symbol('required');
+export const binderNodeSymbol = Symbol('binderState');
 
 interface HasFromString<T> {
   [fromStringSymbol](value: string): T
 }
 
 export type ModelParent<T> = AbstractModel<any> | Binder<T, AbstractModel<T>>;
+//
+// export type ChildModel<T, K extends keyof T = keyof T> = AbstractModel<T[K]> & {
+//   [parentSymbol]: AbstractModel<T>
+// };
 
 export interface ModelConstructor<T, M extends AbstractModel<T>> {
   createEmptyValue: () => T;
@@ -31,16 +36,19 @@ export abstract class AbstractModel<T> {
 
   private [parentSymbol]: ModelParent<T>;
   private [keySymbol]: keyof any;
-  private [validatorsSymbol] = new Set<Validator<T>>();
+  private [validatorsSymbol]: ReadonlyArray<Validator<T>>;
+
+  readonly [binderNodeSymbol]: BinderNode<T, this>;
 
   constructor(
     parent: ModelParent<T>,
     key: keyof any,
-    ...validators: Array<Validator<T>>
+    ...validators: ReadonlyArray<Validator<T>>
   ) {
+    this[binderNodeSymbol] = new BinderNode(this);
     this[parentSymbol] = parent;
     this[keySymbol] = key;
-    validators.forEach(validator => this[validatorsSymbol].add(validator));
+    this[validatorsSymbol] = validators;
   }
   toString() {
     return String(this.valueOf());
@@ -49,7 +57,7 @@ export abstract class AbstractModel<T> {
     return getValue(this);
   }
   get [requiredSymbol]() {
-    return !![...this[validatorsSymbol]].find(val => val instanceof Required)
+    return !!this[validatorsSymbol].find(val => val instanceof Required)
   }
 }
 
@@ -73,7 +81,7 @@ export class StringModel extends PrimitiveModel<string> implements HasFromString
 
 export class ObjectModel<T> extends AbstractModel<T> {
   static createEmptyValue() {
-    const modelInstance = new this(undefined as any, defaultValueSymbol)
+    const modelInstance = new this(undefined as any, '')
     return Object.keys(modelInstance).reduce(
       (obj: any, key: keyof any) => {
         obj[key] = (
@@ -180,6 +188,7 @@ export function removeItem<T, M extends AbstractModel<T>>(model: M) {
   if (!(model[parentSymbol] instanceof ArrayModel)) {
     throw new TypeError('Not an ArrayModel child');
   }
+  model[binderNodeSymbol].delete();
   const arrayModel = model[parentSymbol] as ArrayModel<T, M>;
   const itemIndex = model[keySymbol] as number;
   setValue(arrayModel, getValue(arrayModel).filter((_, i) => i !== itemIndex));
@@ -197,6 +206,6 @@ export const modelRepeat = <T, M extends AbstractModel<T>>(
       itemTemplate && ((itemModel, index) => itemTemplate(itemModel, getValue(itemModel), index))
     );
 
-export function getModelValidators<T>(model: AbstractModel<T>): Set<Validator<T>> {
+export function getModelValidators<T>(model: AbstractModel<T>): ReadonlyArray<Validator<T>> {
   return model[validatorsSymbol];
 }

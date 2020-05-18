@@ -1,27 +1,37 @@
 /* tslint:disable:max-classes-per-file */
 
 import { directive, Part, PropertyPart } from "lit-html";
-import { AbstractModel, fromStringSymbol, getName, getValue, requiredSymbol, setValue } from "./Models";
-import { validate, ValueError } from "./Validation";
+import {
+  AbstractModel,
+  binderStateSymbol,
+  fromStringSymbol,
+  getName,
+  getValue,
+  requiredSymbol,
+  setValue
+} from "./Models";
+import { ValueError } from "./Validation";
 
-export const fieldSymbol = Symbol('field');
+// export const fieldSymbol = Symbol('field');
 
 interface Field {
   required: boolean,
   invalid: boolean,
   errorMessage: string
 }
+
+export interface FieldStrategy extends Field {
+  element: Element;
+  validate: () => Promise<ReadonlyArray<ValueError<any>>>;
+}
+
 interface FieldState extends Field {
   name: string,
   value: string,
   visited: boolean
+  strategy: FieldStrategy
 }
 const fieldStateMap = new WeakMap<PropertyPart, FieldState>();
-
-export interface FieldStrategy extends Field {
-  element: Element;
-  validate: () => Promise<Array<ValueError<any>>>;
-}
 
 class VaadinFieldStrategy implements FieldStrategy {
   constructor(public element: Element & Field) {}
@@ -70,18 +80,14 @@ export const field = directive(<T>(
       required: false,
       invalid: false,
       errorMessage: '',
-      visited: false
+      visited: false,
+      strategy: isVaadinElement(element) ? new VaadinFieldStrategy(element) : new GenericFieldStrategy(element)
     };
-    fieldStateMap.set(propertyPart, fieldState);
-    fieldStrategy = isVaadinElement(element) ? new VaadinFieldStrategy(element) : new GenericFieldStrategy(element);
-    (model as any)[fieldSymbol] = fieldStrategy;
 
-    fieldStrategy.validate = async () => {
-
+    fieldState.strategy.validate = async () => {
       fieldState.visited = true;
 
-
-      const errors = await validate(model);
+      const errors = await model[binderStateSymbol].validate();
 
       const displayedError = errors[0];
       fieldStrategy.invalid = fieldState.invalid = displayedError !== undefined;
@@ -95,6 +101,7 @@ export const field = directive(<T>(
 
     const updateValueFromElement = () => {
       fieldState.value = element.value;
+      model[binderStateSymbol].visited = true;
       setValue(model, (model as any)[fromStringSymbol](element.value));
       if (effect !== undefined) {
         effect.call(element, element);
@@ -116,7 +123,6 @@ export const field = directive(<T>(
     element.checkValidity = () => !fieldState.invalid;
   } else {
     fieldState = fieldStateMap.get(propertyPart)!;
-    fieldStrategy = (model as any)[fieldSymbol] as FieldStrategy;
   }
 
   const name = getName(model);
@@ -134,6 +140,6 @@ export const field = directive(<T>(
   const required = model[requiredSymbol];
   if (required !== fieldState.required) {
     fieldState.required = required;
-    fieldStrategy.required = required;
+    fieldState.strategy.required = required;
   }
 });
