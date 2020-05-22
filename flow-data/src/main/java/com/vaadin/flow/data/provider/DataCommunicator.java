@@ -29,8 +29,6 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.slf4j.LoggerFactory;
-
 import com.vaadin.flow.data.provider.ArrayUpdater.Update;
 import com.vaadin.flow.data.provider.DataChangeEvent.DataRefreshEvent;
 import com.vaadin.flow.function.SerializableComparator;
@@ -45,6 +43,7 @@ import elemental.json.Json;
 import elemental.json.JsonArray;
 import elemental.json.JsonObject;
 import elemental.json.JsonValue;
+import static org.slf4j.LoggerFactory.getLogger;
 
 /**
  * DataProvider base class. This class is the base for all DataProvider
@@ -100,6 +99,13 @@ public class DataCommunicator<T> implements Serializable {
 
     private SerializableConsumer<ExecutionContext> flushRequest;
     private SerializableConsumer<ExecutionContext> flushUpdatedDataRequest;
+
+    private int initialSizeEstimate = -1;
+    private CallbackDataProvider.CountCallback<T, ?> sizeCallback;
+    private boolean definedSize = true;
+    private boolean skipSizeCheckUntilReset;
+    private int pageSize;
+    private int bufferPageCount = 3;
 
     private static class SizeVerifier<T> implements Consumer<T>, Serializable {
 
@@ -170,6 +176,7 @@ public class DataCommunicator<T> implements Serializable {
      * It effectively resends all available data.
      */
     public void reset() {
+        skipSizeCheckUntilReset = false;
         resendEntireRange = true;
         dataGenerator.destroyAllData();
         updatedData.clear();
@@ -220,6 +227,10 @@ public class DataCommunicator<T> implements Serializable {
      * The returned consumer can be used to set some other filter value that
      * should be included in queries sent to the data provider. It is only valid
      * until another data provider is set.
+     * <p>
+     * This method also sets the data communicator to defined size - meaning
+     * that the given data provider is queried for size and previous size
+     * estimates are discarded.
      *
      * @param dataProvider
      *            the data provider to set, not <code>null</code>
@@ -236,6 +247,7 @@ public class DataCommunicator<T> implements Serializable {
             DataProvider<T, F> dataProvider, F initialFilter) {
         Objects.requireNonNull(dataProvider, "data provider cannot be null");
         filter = initialFilter;
+        doSetSizeCallback(null, true);
 
         handleDetach();
 
@@ -307,6 +319,66 @@ public class DataCommunicator<T> implements Serializable {
     }
 
     /**
+     * TODO
+     * 
+     * @param pageSize
+     */
+    public void setPageSize(int pageSize) {
+        this.pageSize = pageSize;
+    }
+
+    /**
+     * TODO
+     *
+     * @param bufferPageCount
+     */
+    public void setBufferPageCount(int bufferPageCount) {
+        this.bufferPageCount = bufferPageCount;
+    }
+
+    /**
+     * TODO
+     */
+    public void setSizeCallback(
+            CallbackDataProvider.CountCallback<T, ?> sizeCallback) {
+        doSetSizeCallback(sizeCallback, true);
+        // TODO
+        throw new UnsupportedOperationException("Not implemented yet.");
+    }
+
+    /**
+     * TODO
+     */
+    public void setSizeEstimateCallback(
+            CallbackDataProvider.CountCallback<T, ?> sizeEstimateCallback) {
+        doSetSizeCallback(sizeEstimateCallback, false);
+        // TODO
+        throw new UnsupportedOperationException("Not implemented yet.");
+    }
+
+    /**
+     * TODO
+     */
+    public void setInitialSizeEstimate(int initialSizeEstimate) {
+        doSetSizeCallback(null, false);
+        this.initialSizeEstimate = initialSizeEstimate;
+    }
+
+    /**
+     * TODO
+     */
+    public void setSizeUndefined() {
+        doSetSizeCallback(null, false);
+        }
+
+    private void doSetSizeCallback(
+            CallbackDataProvider.CountCallback<T, ?> sizeCallback,
+            boolean definedSize) {
+        this.sizeCallback = sizeCallback;
+        this.definedSize = definedSize;
+    }
+
+    /**
      * Gets the {@link DataKeyMapper} used by this {@link DataCommunicator}. Key
      * mapper can be used to map keys sent to the client-side back to their
      * respective data objects.
@@ -371,14 +443,43 @@ public class DataCommunicator<T> implements Serializable {
     }
 
     /**
-     * Getter method for finding the size of DataProvider. Can be overridden by
-     * a subclass that uses a specific type of DataProvider and/or query.
+     * Getter method for determining the initial size/estimated size of the
+     * data. Can be overridden by a subclass that uses a specific type of
+     * DataProvider and/or query.
      *
      * @return the size of data provider with current filter
      */
     @SuppressWarnings({ "unchecked", "rawtypes" })
     protected int getDataProviderSize() {
         return getDataProvider().size(new Query(getFilter()));
+    }
+
+    private void updateUndefinedSize(Range previousActive) {
+        // things have reset
+        if (resendEntireRange) {
+            // 1. given size estimate
+            int size = initialSizeEstimate;
+            // 2. given estimate callback / defined size callback
+            if (sizeCallback != null) {
+                size = sizeCallback.count(new Query(getFilter()));
+            }
+            // 3. default initial size
+            if (size == -1) {
+                size = getDefaultInitialSize();
+            }
+            assumedSize = size;
+        } else {
+            // by default adjust size by multiple of page size
+            // TODO provide a way to control how many buffer pages fetched ?
+            if (requestedRange.getEnd() + pageSize > assumedSize) {
+                assumedSize += pageSize * bufferPageCount;
+            }
+        }
+    }
+
+    private int getDefaultInitialSize() {
+        // for now using the same initial size as the buffer page increase
+        return pageSize * bufferPageCount;
     }
 
     /**
@@ -406,16 +507,21 @@ public class DataCommunicator<T> implements Serializable {
                 inMemorySorting, filter);
         Stream<T> stream = getDataProvider().fetch(query);
         if (stream.isParallel()) {
-            LoggerFactory.getLogger(DataCommunicator.class)
+            getLogger(DataCommunicator.class)
                     .debug("Data provider {} has returned "
                             + "parallel stream on 'fetch' call",
                             getDataProvider().getClass());
             stream = stream.collect(Collectors.toList()).stream();
             assert !stream.isParallel();
         }
+        // TODO remove / deprecate returned size verification since it is not
+        // needed
+        // at least undefined/estimated size does not need this as limit can be
+        // reached
         SizeVerifier verifier = new SizeVerifier<>(limit);
         stream = stream.peek(verifier);
 
+        // TODO simplify by removing these restrictions
         if (!query.isLimitCalled()) {
             throw new IllegalStateException(
                     getInvalidContractMessage("getLimit"));
@@ -449,7 +555,7 @@ public class DataCommunicator<T> implements Serializable {
     }
 
     protected void handleDataRefreshEvent(DataRefreshEvent<T> event) {
-        refresh (event.getItem());
+        refresh(event.getItem());
     }
 
     private void handleDetach() {
@@ -494,8 +600,13 @@ public class DataCommunicator<T> implements Serializable {
                 activeKeyOrder.size());
 
         // Phase 1: Find all items that the client should have
-        if (resendEntireRange) {
+
+        // With defined size the backend is only queried when necessary
+        if (definedSize && resendEntireRange) {
             assumedSize = getDataProviderSize();
+        } else if (!definedSize && !skipSizeCheckUntilReset) {
+            // with undefined size, size estimate is checked when scrolling down
+            updateUndefinedSize(previousActive);
         }
         effectiveRequested = requestedRange
                 .restrictTo(Range.withLength(0, assumedSize));
@@ -506,10 +617,16 @@ public class DataCommunicator<T> implements Serializable {
         Activation activation = collectKeysToFlush(previousActive,
                 effectiveRequested);
 
-        // If the returned stream from the DataProvider is smaller than it
-        // should, a new query for the actual size needs to be done
+        // In case received less items than what was expected, adjust size
         if (activation.isSizeRecheckNeeded()) {
-            assumedSize = getDataProviderSize();
+            if (definedSize) {
+                assumedSize = getDataProviderSize();
+            } else {
+                // the end has been reached
+                assumedSize = requestedRange.getStart()
+                        + activation.getActiveKeys().size();
+                skipSizeCheckUntilReset = true;
+            }
             effectiveRequested = requestedRange
                     .restrictTo(Range.withLength(0, assumedSize));
         }
